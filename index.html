@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <!-- === НОВОЕ: gun.js для кросс-девайс синхронизации === -->
+  <!-- НОВОЕ: GUN для кросс-девайс синхронизации -->
   <script src="https://cdn.jsdelivr.net/npm/gun/gun.min.js"></script>
   <style>
     :root {
@@ -18,7 +18,7 @@
       --muted: #a8b0d3;
       --accent: #6c8cff;
       --accent-2: #29d3b1;
-      --danger: #ff5c7а;
+      --danger: #ff5c7a;
       --ok: #29c76f;
       --border: #2a315f;
       --shadow: 0 10px 20px rgba(0,0,0,.25);
@@ -349,34 +349,53 @@
     const randCode = () => 'V-' + Math.random().toString(36).substring(2, 8).toUpperCase();
     const uid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
 
-    // Локальное хранилище с неймспейсом
     const store = {
       get(key){ try { return JSON.parse(localStorage.getItem(key)); } catch(e){ return null; } },
       set(key,val){ localStorage.setItem(key, JSON.stringify(val)); },
       del(key){ localStorage.removeItem(key); }
     };
 
-    // ==== НОВОЕ: минимальный слой синхронизации через GUN ====
-    let gun = null, gunNode = null, lastCloudTs = 0, fromCloud = false;
+    // ==== СИНХРОНИЗАЦИЯ (GUN) ====
+    let gun = null, gunNode = null, lastCloudTs = 0, fromCloud = false, cloudBoundId = null;
     function setupCloud(){
       if(gun) return;
       try {
-        gun = Gun([
-          'https://gun-manhattan.herokuapp.com/gun',
-          'https://relay.peer.gunjs.org/gun'
-        ]);
+        // Убрали устаревший Heroku, оставили живой релей
+        gun = Gun({ peers: ['https://relay.peer.gunjs.org/gun'] });
       } catch(e){ console.warn('GUN init failed', e); }
     }
     function bindCloud(){
       if(!gun || !current.poll) return;
+      if(cloudBoundId === current.poll.id && gunNode) return; // уже подписаны
+      cloudBoundId = current.poll.id;
       gunNode = gun.get('coinpoll').get(current.poll.id);
+
+      // 1) единоразово: подтянуть текущее состояние (если в сети есть более свежее)
+      gunNode.once((d)=>{
+        try{
+          const ts = Number(d?.updatedAt)||0;
+          if(d?.blob && ts > (current.poll?.updatedAt||0)){
+            const incoming = JSON.parse(d.blob);
+            fromCloud = true;
+            current.poll = incoming;
+            store.set('poll:' + current.poll.id, current.poll);
+            renderOptions(); renderVoters(); drawAll(); refreshInfo();
+            fromCloud = false;
+          }
+          lastCloudTs = Math.max(lastCloudTs, ts);
+        }catch(e){}
+      });
+
+      // 2) подписка на все изменения
       gunNode.on((d)=>{
         if(!d || !d.blob) return;
         const ts = Number(d.updatedAt)||0;
-        if(ts <= lastCloudTs) return;
+        if(ts <= lastCloudTs) return; // уже видели
         lastCloudTs = ts;
         try{
           const incoming = JSON.parse(d.blob);
+          // если это наш же объект без изменений — пропускаем
+          if(JSON.stringify(incoming) === JSON.stringify(current.poll)) return;
           fromCloud = true;
           current.poll = incoming;
           store.set('poll:' + current.poll.id, current.poll);
@@ -386,14 +405,16 @@
       });
     }
     function pushCloud(){
-      if(!gunNode || !current.poll || fromCloud) return;
-      const ts = Date.now();
-      lastCloudTs = ts; // предвосхитим эхо
-      gunNode.put({ blob: JSON.stringify(current.poll), updatedAt: ts });
+      if(!gunNode || !current.poll) return;
+      // отметим время обновления
+      current.poll.updatedAt = Date.now();
+      lastCloudTs = current.poll.updatedAt;
+      gunNode.put({ blob: JSON.stringify(current.poll), updatedAt: current.poll.updatedAt });
     }
-    // ==========================================================
+    // периодический пинг (на случай потери события у некоторых сетей)
+    setInterval(()=>{ if(current.poll) pushCloud(); }, 8000);
 
-    // Кодирование/декодирование опроса для передачи в ссылке (с URI-обёрткой)
+    // ====== Кодирование/декодирование для ссылки ======
     function encodeShare(obj){
       try {
         const json = JSON.stringify(obj);
@@ -412,10 +433,9 @@
       } catch(e){ console.warn('decodeShare failed', e); return null; }
     }
 
-    // Глобальное состояние текущего опроса
+    // ====== Состязние ======
     let current = { poll: null, chart: null, screenChart: null, bc: null };
 
-    // Обновление информации в карточке «Статус»
     function refreshInfo(){
       $('#info-poll-id').textContent = current.poll?.id || '—';
       $('#info-status').textContent = current.poll?.status || 'draft';
@@ -431,70 +451,57 @@
       $('#link-screen').value = screenLink;
     }
 
-    // Создать пустой опрос (черновик)
     function newPoll(){
       const poll = {
         id: uid(),
         title: '',
-        status: 'draft', // 'open' | 'closed'
-        options: [], // {id, label}
-        voters: [], // {name, coins, code, submitted}
-        votes: {} // code -> { optionId: coins }
+        status: 'draft',
+        options: [],
+        voters: [],
+        votes: {},
+        updatedAt: Date.now()
       };
       current.poll = poll;
       store.set('poll:' + poll.id, poll);
-      const my = store.get('my-polls') || [];
-      if(!my.includes(poll.id)) { my.unshift(poll.id); store.set('my-polls', my); }
-      renderOptions();
-      renderVoters();
-      refreshInfo();
+      renderOptions(); renderVoters(); refreshInfo();
       $('#poll-title').value = '';
-      // НОВОЕ: привязываем и публикуем в облако
+
       setupCloud(); bindCloud(); pushCloud();
     }
 
-    // Сохранить в хранилище, разослать сигнал и отправить в облако
     function savePoll(){
       if(!current.poll) return;
       store.set('poll:' + current.poll.id, current.poll);
       localStorage.setItem('poll:sig', String(Date.now()));
       if(current.bc) current.bc.postMessage({ t:'updated', id: current.poll.id });
-      pushCloud(); // НОВОЕ
+      pushCloud();
     }
 
-    // Загрузить опрос по id
     function loadPoll(id){
       const p = store.get('poll:' + id);
       if(!p) return false;
       current.poll = p;
-      renderOptions();
-      renderVoters();
+      renderOptions(); renderVoters();
       $('#poll-title').value = p.title || '';
       refreshInfo();
-      // НОВОЕ: подписка на облачные обновления
-      setupCloud(); bindCloud();
+      setupCloud(); bindCloud(); pushCloud(); // сразу объявимся в сети
       return true;
     }
 
-    // Найти опрос по коду участника (UPPERCASE)
     function findPollByCode(code){
       const codeKey = (code||'').toUpperCase();
-      const map = store.get('access:map') || {}; // code(UPPER) -> pollId
+      const map = store.get('access:map') || {};
       const pid = map[codeKey];
       if(!pid) return null;
       return store.get('poll:' + pid) || null;
     }
-
-    // Зарегистрировать карту кодов: code(UPPER) -> pollId
     function registerCodes(){
       const map = store.get('access:map') || {};
-      (current.poll?.voters||[]).forEach(v => {
-        if(v.code) map[(v.code||'').toUpperCase()] = current.poll.id;
-      });
+      (current.poll?.voters||[]).forEach(v => { if(v.code) map[(v.code||'').toUpperCase()] = current.poll.id; });
       store.set('access:map', map);
     }
 
-    // ======= РЕНДЕР ВАРИАНТОВ =======
+    // ====== Рендер списков/результатов ======
     function renderOptions(){
       const wrap = $('#options-list');
       wrap.innerHTML = '';
@@ -525,7 +532,6 @@
       })
     }
 
-    // ======= РЕНДЕР УЧАСТНИКОВ =======
     function renderVoters(){
       const tbody = $('#voters-tbody');
       tbody.innerHTML='';
@@ -571,7 +577,6 @@
       }));
     }
 
-    // ======= ПОДСЧЁТ =======
     function tally(){
       const totals = {};
       (current.poll?.options || []).forEach(o => totals[o.id] = 0);
@@ -586,7 +591,6 @@
       return { totals, totalBudget, used };
     }
 
-    // ======= ГРАФИКИ =======
     function drawAll(){ drawChart('#chart'); fillResultsTable(); drawScreen(); }
 
     function drawChart(sel){
@@ -674,7 +678,6 @@
     }
 
     function sumAlloc(){ return Object.values(vState.allocations).reduce((a,b)=>a+(Number(b)||0),0); }
-
     function constrainAllocations(){
       const total = sumAlloc();
       if(total <= vState.budget) return;
@@ -686,7 +689,6 @@
         if(input) input.value = vState.allocations[active];
       }
     }
-
     function updateRemaining(){
       const used = sumAlloc();
       const remaining = Math.max(0, vState.budget - used);
@@ -732,7 +734,7 @@
       $('#screen-used').textContent = used;
     }
 
-    // ======= ПЕРЕКЛЮЧЕНИЕ ВКЛАДОК =======
+    // ======= ПЕРЕКЛЮЧЕНИЕ ВКЛАДОК / ИНИЦ =======
     function showPanel(name){
       const ids = ['organizer','voter','screen'];
       ids.forEach(id=>{
@@ -858,7 +860,7 @@
     // ======= СТАРТ =======
     (function start(){
       const q = new URLSearchParams(location.search);
-      // 1) Импорт опроса из data= (обязательно decodeURIComponent)
+      // импорт из data=
       let injectedId = null;
       const dataRaw = q.get('data');
       if(dataRaw){
@@ -869,17 +871,15 @@
           injectedId = obj.id;
         }
       }
-      // 2) Выбираем id: явно из ?poll=, иначе импортированный, иначе создаем новый
       const pid = q.get('poll') || injectedId;
       if(!pid) newPoll(); else loadPoll(pid) || newPoll();
 
-      // Если импортировали опрос — зарегистрировать коды (в UPPERCASE)
       if(injectedId){ try { registerCodes(); } catch(e){} }
 
-      refreshInfo();
-      drawAll();
-      initFromQuery();
-      if(current.poll) { setupBroadcast(); setupCloud(); bindCloud(); }
+      refreshInfo(); drawAll(); initFromQuery();
+      if(current.poll){ setupBroadcast(); setupCloud(); bindCloud(); pushCloud(); }
+      // если вернулись в онлайн — обновим
+      window.addEventListener('online', ()=>{ setupCloud(); bindCloud(); pushCloud(); });
     })();
   </script>
 </body>
