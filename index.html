@@ -355,6 +355,26 @@
       del(key){ localStorage.removeItem(key); }
     };
 
+    // >>> НОВОЕ: кодирование/декодирование опроса для передачи в ссылке
+    function encodeShare(obj){
+      try {
+        const json = JSON.stringify(obj);
+        const bytes = new TextEncoder().encode(json);
+        let bin = '';
+        bytes.forEach(b => bin += String.fromCharCode(b));
+        return btoa(bin);
+      } catch(e){ console.error(e); return ''; }
+    }
+    function decodeShare(s){
+      try {
+        const bin = atob(s);
+        const bytes = new Uint8Array([...bin].map(ch => ch.charCodeAt(0)));
+        const json = new TextDecoder().decode(bytes);
+        return JSON.parse(json);
+      } catch(e){ console.warn('decodeShare failed', e); return null; }
+    }
+    // <<< НОВОЕ
+
     // Глобальное состояние текущего опроса
     let current = { poll: null, chart: null, screenChart: null, bc: null };
 
@@ -364,10 +384,16 @@
       $('#info-status').textContent = current.poll?.status || 'draft';
       $('#info-options').textContent = current.poll?.options?.length || 0;
       $('#info-voters').textContent = current.poll?.voters?.length || 0;
-      const voterLink = location.origin + location.pathname + '?view=voter&poll=' + (current.poll?.id || '')
+
+      // >>> НОВОЕ: формируем ссылки с встроенной копией опроса
+      const pack = current.poll ? encodeShare(current.poll) : '';
+      const base = location.origin + location.pathname;
+      const pid  = current.poll?.id || '';
+      const voterLink  = `${base}?view=voter&poll=${pid}${pack ? `&data=${pack}` : ''}`;
+      const screenLink = `${base}?view=screen&poll=${pid}${pack ? `&data=${pack}` : ''}`;
       $('#link-voter').value = voterLink;
-      const screenLink = location.origin + location.pathname + '?view=screen&poll=' + (current.poll?.id || '')
       $('#link-screen').value = screenLink;
+      // <<< НОВОЕ
     }
 
     // Создать пустой опрос (черновик)
@@ -796,8 +822,6 @@
     function initFromQuery(){
       const q = new URLSearchParams(location.search);
       const view = q.get('view');
-      const pollId = q.get('poll');
-      if(pollId){ loadPoll(pollId); }
       if(view==='voter'){ showPanel('voter'); }
       else if(view==='screen'){ showPanel('screen'); }
       else { showPanel('organizer'); }
@@ -806,10 +830,24 @@
 
     // ======= СТАРТ =======
     (function start(){
-      // если в URL нет poll — создаем новый
       const q = new URLSearchParams(location.search);
-      const pid = q.get('poll');
+      // 1) Импорт опроса из data=, если пришли по внешней ссылке
+      let injectedId = null;
+      const dataParam = q.get('data');
+      if(dataParam){
+        const obj = decodeShare(dataParam);
+        if(obj && obj.id){
+          store.set('poll:' + obj.id, obj);
+          injectedId = obj.id;
+        }
+      }
+      // 2) Выбираем id: явно из ?poll=, иначе импортированный, иначе создаем новый
+      const pid = q.get('poll') || injectedId;
       if(!pid) newPoll(); else loadPoll(pid) || newPoll();
+
+      // >>> НОВОЕ: если импортировали опрос, зарегистрируем коды участника для поиска по коду
+      if(injectedId){ try { registerCodes(); } catch(e){} }
+
       refreshInfo();
       drawAll();
       initFromQuery();
