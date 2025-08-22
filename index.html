@@ -7,6 +7,8 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <!-- === НОВОЕ: gun.js для кросс-девайс синхронизации === -->
+  <script src="https://cdn.jsdelivr.net/npm/gun/gun.min.js"></script>
   <style>
     :root {
       --bg: #0f1222;
@@ -16,7 +18,7 @@
       --muted: #a8b0d3;
       --accent: #6c8cff;
       --accent-2: #29d3b1;
-      --danger: #ff5c7a;
+      --danger: #ff5c7а;
       --ok: #29c76f;
       --border: #2a315f;
       --shadow: 0 10px 20px rgba(0,0,0,.25);
@@ -354,7 +356,44 @@
       del(key){ localStorage.removeItem(key); }
     };
 
-    // Кодирование/декодирование опроса для передачи в ссылке
+    // ==== НОВОЕ: минимальный слой синхронизации через GUN ====
+    let gun = null, gunNode = null, lastCloudTs = 0, fromCloud = false;
+    function setupCloud(){
+      if(gun) return;
+      try {
+        gun = Gun([
+          'https://gun-manhattan.herokuapp.com/gun',
+          'https://relay.peer.gunjs.org/gun'
+        ]);
+      } catch(e){ console.warn('GUN init failed', e); }
+    }
+    function bindCloud(){
+      if(!gun || !current.poll) return;
+      gunNode = gun.get('coinpoll').get(current.poll.id);
+      gunNode.on((d)=>{
+        if(!d || !d.blob) return;
+        const ts = Number(d.updatedAt)||0;
+        if(ts <= lastCloudTs) return;
+        lastCloudTs = ts;
+        try{
+          const incoming = JSON.parse(d.blob);
+          fromCloud = true;
+          current.poll = incoming;
+          store.set('poll:' + current.poll.id, current.poll);
+          renderOptions(); renderVoters(); drawAll(); refreshInfo();
+          fromCloud = false;
+        } catch(e){ console.warn('Cloud parse failed', e); }
+      });
+    }
+    function pushCloud(){
+      if(!gunNode || !current.poll || fromCloud) return;
+      const ts = Date.now();
+      lastCloudTs = ts; // предвосхитим эхо
+      gunNode.put({ blob: JSON.stringify(current.poll), updatedAt: ts });
+    }
+    // ==========================================================
+
+    // Кодирование/декодирование опроса для передачи в ссылке (с URI-обёрткой)
     function encodeShare(obj){
       try {
         const json = JSON.stringify(obj);
@@ -383,13 +422,11 @@
       $('#info-options').textContent = current.poll?.options?.length || 0;
       $('#info-voters').textContent = current.poll?.voters?.length || 0;
 
-      // Ссылки с вшитой копией опроса — ОБЯЗАТЕЛЬНО кодируем в URL
-      const pack = current.poll ? encodeShare(current.poll) : '';
-      const packEnc = pack ? encodeURIComponent(pack) : '';
+      const pack = current.poll ? encodeURIComponent(encodeShare(current.poll)) : '';
       const base = location.origin + location.pathname;
       const pid  = current.poll?.id || '';
-      const voterLink  = `${base}?view=voter&poll=${pid}${packEnc ? `&data=${packEnc}` : ''}`;
-      const screenLink = `${base}?view=screen&poll=${pid}${packEnc ? `&data=${packEnc}` : ''}`;
+      const voterLink  = `${base}?view=voter&poll=${pid}${pack ? `&data=${pack}` : ''}`;
+      const screenLink = `${base}?view=screen&poll=${pid}${pack ? `&data=${pack}` : ''}`;
       $('#link-voter').value = voterLink;
       $('#link-screen').value = screenLink;
     }
@@ -412,14 +449,17 @@
       renderVoters();
       refreshInfo();
       $('#poll-title').value = '';
+      // НОВОЕ: привязываем и публикуем в облако
+      setupCloud(); bindCloud(); pushCloud();
     }
 
-    // Сохранить в хранилище и разослать сигнал
+    // Сохранить в хранилище, разослать сигнал и отправить в облако
     function savePoll(){
       if(!current.poll) return;
       store.set('poll:' + current.poll.id, current.poll);
       localStorage.setItem('poll:sig', String(Date.now()));
       if(current.bc) current.bc.postMessage({ t:'updated', id: current.poll.id });
+      pushCloud(); // НОВОЕ
     }
 
     // Загрузить опрос по id
@@ -431,10 +471,12 @@
       renderVoters();
       $('#poll-title').value = p.title || '';
       refreshInfo();
+      // НОВОЕ: подписка на облачные обновления
+      setupCloud(); bindCloud();
       return true;
     }
 
-    // Найти опрос по коду участника (нормализация к UPPERCASE)
+    // Найти опрос по коду участника (UPPERCASE)
     function findPollByCode(code){
       const codeKey = (code||'').toUpperCase();
       const map = store.get('access:map') || {}; // code(UPPER) -> pollId
@@ -447,9 +489,7 @@
     function registerCodes(){
       const map = store.get('access:map') || {};
       (current.poll?.voters||[]).forEach(v => {
-        if(v.code){
-          map[(v.code||'').toUpperCase()] = current.poll.id;
-        }
+        if(v.code) map[(v.code||'').toUpperCase()] = current.poll.id;
       });
       store.set('access:map', map);
     }
@@ -458,7 +498,7 @@
     function renderOptions(){
       const wrap = $('#options-list');
       wrap.innerHTML = '';
-      (current.poll?.options || []).forEach((opt, idx) => {
+      (current.poll?.options || []).forEach((opt) => {
         const row = document.createElement('div');
         row.className = 'item';
         row.innerHTML = `
@@ -505,13 +545,9 @@
       tbody.querySelectorAll('input').forEach(inp => {
         inp.addEventListener('input', (e)=>{
           const i = +e.target.dataset.i, f = e.target.dataset.f;
-          if(f==='coins') {
-            current.poll.voters[i][f] = Math.max(0, parseInt(e.target.value||'0'));
-          } else {
-            current.poll.voters[i][f] = e.target.value;
-          }
+          if(f==='coins') current.poll.voters[i][f] = Math.max(0, parseInt(e.target.value||'0'));
+          else current.poll.voters[i][f] = e.target.value;
           savePoll(); refreshInfo();
-          // >>> если изменили код — пересобрать карту кодов (UPPER)
           if(f==='code') registerCodes();
         });
       });
@@ -843,7 +879,7 @@
       refreshInfo();
       drawAll();
       initFromQuery();
-      if(current.poll) setupBroadcast();
+      if(current.poll) { setupBroadcast(); setupCloud(); bindCloud(); }
     })();
   </script>
 </body>
