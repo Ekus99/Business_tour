@@ -14,8 +14,8 @@
       --panel-2: #1b2040;
       --text: #e8eaf6;
       --muted: #a8b0d3;
-      --accent: #6c8cff; /* индиго/фиолетовый */
-      --accent-2: #29d3b1; /* бирюзовый */
+      --accent: #6c8cff;
+      --accent-2: #29d3b1;
       --danger: #ff5c7a;
       --ok: #29c76f;
       --border: #2a315f;
@@ -115,7 +115,6 @@
     .right { margin-left:auto; }
     .hidden { display:none !important; }
 
-    /* Fullscreen results */
     .screen { min-height: calc(100vh - 80px); display:flex; flex-direction:column; gap:14px; }
     .screen .card { background: linear-gradient(180deg, rgba(16,20,52,.8), rgba(16,20,52,.5)); }
     .screen-title { font-size: clamp(22px, 3vw, 36px); font-weight:800; }
@@ -224,7 +223,7 @@
           <div class="sub">Работают на этом же устройстве/браузере (локальное хранилище).</div>
           <div class="sep"></div>
           <div class="field">
-            <label>Ссылка для участников (локальная)</label>
+            <label>Ссылка для участников (локальная/кросс-девайс)</label>
             <div class="row">
               <input id="link-voter" type="text" readonly class="code" />
               <button class="btn copy" data-copy="#link-voter">Копировать</button>
@@ -355,7 +354,7 @@
       del(key){ localStorage.removeItem(key); }
     };
 
-    // >>> НОВОЕ: кодирование/декодирование опроса для передачи в ссылке
+    // Кодирование/декодирование опроса для передачи в ссылке
     function encodeShare(obj){
       try {
         const json = JSON.stringify(obj);
@@ -373,7 +372,6 @@
         return JSON.parse(json);
       } catch(e){ console.warn('decodeShare failed', e); return null; }
     }
-    // <<< НОВОЕ
 
     // Глобальное состояние текущего опроса
     let current = { poll: null, chart: null, screenChart: null, bc: null };
@@ -385,15 +383,15 @@
       $('#info-options').textContent = current.poll?.options?.length || 0;
       $('#info-voters').textContent = current.poll?.voters?.length || 0;
 
-      // >>> НОВОЕ: формируем ссылки с встроенной копией опроса
+      // Ссылки с вшитой копией опроса — ОБЯЗАТЕЛЬНО кодируем в URL
       const pack = current.poll ? encodeShare(current.poll) : '';
+      const packEnc = pack ? encodeURIComponent(pack) : '';
       const base = location.origin + location.pathname;
       const pid  = current.poll?.id || '';
-      const voterLink  = `${base}?view=voter&poll=${pid}${pack ? `&data=${pack}` : ''}`;
-      const screenLink = `${base}?view=screen&poll=${pid}${pack ? `&data=${pack}` : ''}`;
+      const voterLink  = `${base}?view=voter&poll=${pid}${packEnc ? `&data=${packEnc}` : ''}`;
+      const screenLink = `${base}?view=screen&poll=${pid}${packEnc ? `&data=${packEnc}` : ''}`;
       $('#link-voter').value = voterLink;
       $('#link-screen').value = screenLink;
-      // <<< НОВОЕ
     }
 
     // Создать пустой опрос (черновик)
@@ -408,7 +406,6 @@
       };
       current.poll = poll;
       store.set('poll:' + poll.id, poll);
-      // Список моих опросов (для возможного последующего расширения)
       const my = store.get('my-polls') || [];
       if(!my.includes(poll.id)) { my.unshift(poll.id); store.set('my-polls', my); }
       renderOptions();
@@ -421,7 +418,6 @@
     function savePoll(){
       if(!current.poll) return;
       store.set('poll:' + current.poll.id, current.poll);
-      // Сообщим другим вкладкам
       localStorage.setItem('poll:sig', String(Date.now()));
       if(current.bc) current.bc.postMessage({ t:'updated', id: current.poll.id });
     }
@@ -438,18 +434,23 @@
       return true;
     }
 
-    // Найти опрос по коду участника
+    // Найти опрос по коду участника (нормализация к UPPERCASE)
     function findPollByCode(code){
-      const map = store.get('access:map') || {}; // code -> pollId
-      const pid = map[code];
+      const codeKey = (code||'').toUpperCase();
+      const map = store.get('access:map') || {}; // code(UPPER) -> pollId
+      const pid = map[codeKey];
       if(!pid) return null;
       return store.get('poll:' + pid) || null;
     }
 
-    // Зарегистрировать карту кодов: code -> pollId
+    // Зарегистрировать карту кодов: code(UPPER) -> pollId
     function registerCodes(){
       const map = store.get('access:map') || {};
-      current.poll.voters.forEach(v => { if(v.code) map[v.code] = current.poll.id; });
+      (current.poll?.voters||[]).forEach(v => {
+        if(v.code){
+          map[(v.code||'').toUpperCase()] = current.poll.id;
+        }
+      });
       store.set('access:map', map);
     }
 
@@ -478,7 +479,6 @@
         btn.addEventListener('click', ()=>{
           const id = btn.dataset.id;
           current.poll.options = current.poll.options.filter(x=>x.id!==id);
-          // удалить возможные монеты в голосах по этому id
           Object.values(current.poll.votes).forEach(alloc => { delete alloc[id]; });
           savePoll(); renderOptions(); drawAll(); refreshInfo();
         });
@@ -505,14 +505,20 @@
       tbody.querySelectorAll('input').forEach(inp => {
         inp.addEventListener('input', (e)=>{
           const i = +e.target.dataset.i, f = e.target.dataset.f;
-          if(f==='coins') current.poll.voters[i][f] = Math.max(0, parseInt(e.target.value||'0')); else current.poll.voters[i][f] = e.target.value;
+          if(f==='coins') {
+            current.poll.voters[i][f] = Math.max(0, parseInt(e.target.value||'0'));
+          } else {
+            current.poll.voters[i][f] = e.target.value;
+          }
           savePoll(); refreshInfo();
+          // >>> если изменили код — пересобрать карту кодов (UPPER)
+          if(f==='code') registerCodes();
         });
       });
       tbody.querySelectorAll('[data-del]').forEach(btn => btn.addEventListener('click', ()=>{
         const i = +btn.dataset.i;
         const code = current.poll.voters[i].code;
-        if(code){ const map = store.get('access:map')||{}; delete map[code]; store.set('access:map', map); }
+        if(code){ const map = store.get('access:map')||{}; delete map[(code||'').toUpperCase()]; store.set('access:map', map); }
         current.poll.voters.splice(i,1);
         savePoll(); renderVoters(); refreshInfo();
       }));
@@ -588,7 +594,7 @@
       $('#v-code').value = code;
       const poll = findPollByCode(code);
       if(!poll){ $('#join-msg').textContent = 'Код не найден. Проверьте правильность или обратитесь к организатору.'; return; }
-      current.poll = poll; refreshInfo(); // подхватываем контекст
+      current.poll = poll; refreshInfo();
       const voter = poll.voters.find(v=> (v.code||'').toUpperCase()===code);
       if(!voter){ $('#join-msg').textContent = 'Код не найден в списке участников.'; return; }
       if(poll.status==='closed'){ $('#join-msg').textContent = 'Опрос завершен. Отправка новых голосов недоступна.'; }
@@ -635,10 +641,8 @@
 
     function constrainAllocations(){
       const total = sumAlloc();
-      if(total <= vState.budget) return; // ок
-      // если превысили бюджет — уменьшим последнюю правку
+      if(total <= vState.budget) return;
       const over = total - vState.budget;
-      // Найдём активный элемент
       const active = document.activeElement?.dataset?.id;
       if(active){
         vState.allocations[active] = Math.max(0, (Number(vState.allocations[active])||0) - over);
@@ -658,7 +662,6 @@
     function submitVote(){
       if(!current.poll || !vState.code) return;
       if(current.poll.status==='closed'){ $('#submit-msg').textContent = 'Опрос завершен.'; return; }
-      // фильтруем нули
       const clean = {};
       Object.entries(vState.allocations).forEach(([k,v])=>{ const n=Number(v)||0; if(n>0) clean[k]=n; });
       current.poll.votes[vState.code] = clean;
@@ -693,7 +696,7 @@
       $('#screen-used').textContent = used;
     }
 
-    // ======= ПЕРЕКЛЮЧЕНИЕ ВКЛАДОК / ИНИЦ =======
+    // ======= ПЕРЕКЛЮЧЕНИЕ ВКЛАДОК =======
     function showPanel(name){
       const ids = ['organizer','voter','screen'];
       ids.forEach(id=>{
@@ -703,12 +706,10 @@
     }
 
     // ======= СОБЫТИЯ =======
-    // Табы
     $('#tab-organizer').addEventListener('click', ()=>showPanel('organizer'));
     $('#tab-voter').addEventListener('click', ()=>showPanel('voter'));
     $('#tab-screen').addEventListener('click', ()=>showPanel('screen'));
 
-    // Варианты
     $('#btn-add-option').addEventListener('click', ()=>{
       current.poll.options.push({ id: uid(), label: 'Новый вариант' });
       savePoll(); renderOptions(); drawAll(); refreshInfo();
@@ -716,15 +717,12 @@
     $('#btn-clear-options').addEventListener('click', ()=>{
       if(!confirm('Удалить все варианты?')) return;
       current.poll.options = [];
-      // чистим распределения
       Object.values(current.poll.votes).forEach(alloc => { Object.keys(alloc).forEach(k=> delete alloc[k]); });
       savePoll(); renderOptions(); drawAll(); refreshInfo();
     });
 
-    // Название
     $('#poll-title').addEventListener('input', (e)=>{ current.poll.title = e.target.value; savePoll(); drawAll(); });
 
-    // Участники
     $('#btn-add-voter').addEventListener('click', ()=>{
       current.poll.voters.push({ name: 'Участник', coins: 10, code: randCode(), submitted:false });
       savePoll(); renderVoters(); refreshInfo(); registerCodes();
@@ -746,7 +744,6 @@
       savePoll(); drawAll();
     });
 
-    // Управление опросом
     $('#btn-start').addEventListener('click', ()=>{
       if((current.poll.options||[]).length===0) { alert('Добавьте хотя бы один вариант.'); return; }
       current.poll.status = 'open';
@@ -755,7 +752,6 @@
     $('#btn-close').addEventListener('click', ()=>{ current.poll.status = 'closed'; savePoll(); refreshInfo(); alert('Опрос завершен.'); });
     $('#btn-new').addEventListener('click', ()=>{ if(confirm('Создать новый опрос? Текущий сохранится в хранилище.')) newPoll(); });
 
-    // Экспорт/импорт
     $('#btn-export').addEventListener('click', ()=>{
       const blob = new Blob([JSON.stringify(current.poll, null, 2)], {type:'application/json'});
       const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `poll-${current.poll.id}.json`; a.click();
@@ -769,7 +765,6 @@
       }; reader.readAsText(file);
     });
 
-    // Копирование ссылок
     $$('.copy').forEach(btn => {
       btn.addEventListener('click', ()=>{
         const sel = btn.dataset.copy; const inp = document.querySelector(sel);
@@ -778,7 +773,6 @@
       })
     });
 
-    // Презентационный экран / фуллскрин
     $('#btn-open-screen').addEventListener('click', ()=>{
       window.open(location.origin + location.pathname + '?view=screen&poll=' + current.poll.id, '_blank');
     });
@@ -787,7 +781,6 @@
     });
     $('#btn-refresh').addEventListener('click', drawAll);
 
-    // Вкладка участника
     $('#btn-join').addEventListener('click', ()=> joinByCode($('#v-code').value));
     $('#btn-even').addEventListener('click', ()=>{
       const opts = current.poll?.options||[]; if(opts.length===0) return;
@@ -800,10 +793,8 @@
     $('#btn-clear').addEventListener('click', ()=>{ vState.allocations = {}; renderAllocationForm(); updateRemaining(); });
     $('#btn-submit').addEventListener('click', submitVote);
 
-    // Экран результатов
     $('#btn-screen-full').addEventListener('click', ()=> document.documentElement.requestFullscreen?.());
 
-    // Слушатели синхронизации
     window.addEventListener('storage', (e)=>{
       if(e.key && e.key.startsWith('poll:')){
         const id = e.key.slice(5);
@@ -831,11 +822,12 @@
     // ======= СТАРТ =======
     (function start(){
       const q = new URLSearchParams(location.search);
-      // 1) Импорт опроса из data=, если пришли по внешней ссылке
+      // 1) Импорт опроса из data= (обязательно decodeURIComponent)
       let injectedId = null;
-      const dataParam = q.get('data');
-      if(dataParam){
-        const obj = decodeShare(dataParam);
+      const dataRaw = q.get('data');
+      if(dataRaw){
+        const decoded = decodeURIComponent(dataRaw);
+        const obj = decodeShare(decoded);
         if(obj && obj.id){
           store.set('poll:' + obj.id, obj);
           injectedId = obj.id;
@@ -845,7 +837,7 @@
       const pid = q.get('poll') || injectedId;
       if(!pid) newPoll(); else loadPoll(pid) || newPoll();
 
-      // >>> НОВОЕ: если импортировали опрос, зарегистрируем коды участника для поиска по коду
+      // Если импортировали опрос — зарегистрировать коды (в UPPERCASE)
       if(injectedId){ try { registerCodes(); } catch(e){} }
 
       refreshInfo();
