@@ -6,6 +6,7 @@
   <title>Опросник с монетами — Организатор и Участник</title>
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/gun/gun.min.js"></script>
   <style>
     :root {
@@ -425,8 +426,17 @@
       if(current.bc) current.bc.postMessage({ t:'updated', id: current.poll.id });
     }
     if(gun && current.poll){
-  gun.get('polls').get(current.poll.id).put(current.poll);
-    }
+  const cleanPoll = {
+    id: current.poll.id,
+    title: current.poll.title,
+    status: current.poll.status,
+    options: current.poll.options,
+    voters: current.poll.voters,
+    votes: current.poll.votes
+  };
+  gun.get('polls').get(current.poll.id).put(cleanPoll);
+ }
+
 
     // Загрузить опрос по id
     function loadPoll(id){
@@ -817,15 +827,23 @@
     function startNetSync(){
   if(!current.poll) return;
   gun.get('polls').get(current.poll.id).on(data=>{
-    if(!data) return;
-    try{
-      current.poll = data;
-      drawAll();
-      refreshInfo();
-    }catch(e){ console.warn('Ошибка sync', e); }
-  });
+  if(!data) return;
+  try{
+    // Берём только валидные поля
+    current.poll = {
+      ...current.poll, // оставляем chart, bc и пр.
+      id: data.id,
+      title: data.title,
+      status: data.status,
+      options: data.options,
+      voters: data.voters,
+      votes: data.votes
+    };
+    drawAll();
+    refreshInfo();
+  }catch(e){ console.warn('Ошибка sync', e); }
+ });
     }
-
 
     // ======= АВТОНАСТРОЙКА ПО ПАРАМЕТРАМ URL =======
     function initFromQuery(){
@@ -870,4 +888,3 @@
   </script>
 </body>
 </html>
-
