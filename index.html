@@ -7,13 +7,9 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <!-- ДОБАВЛЯЕМ GUN.JS -->
+  <!-- Gun.js -->
   <script src="https://cdn.jsdelivr.net/npm/gun/gun.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/gun/sea.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/gun/lib/radix.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/gun/lib/radisk.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/gun/lib/store.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/gun/lib/rindexed.js"></script>
   <style>
     /* ... (все стили остаются без изменений) ... */
   </style>
@@ -30,98 +26,180 @@
 
     // ======= GUN.JS ИНИЦИАЛИЗАЦИЯ =======
     let gun = null;
-    let gunUser = null;
-    
+    let currentGunPoll = null;
+
+    // Инициализация Gun.js
     function initGun() {
-      // Используем публичные пиры Gun.js для демонстрации
-      gun = Gun(['https://gun-manhattan.herokuapp.com/gun', 'https://gun-us.herokuapp.com/gun']);
-      
-      // Создаем анонимного пользователя для синхронизации
-      gunUser = gun.user().recall({ sessionStorage: true });
-      
-      console.log('Gun.js инициализирован');
+      try {
+        // Используем надежные пиры Gun.js
+        gun = Gun({
+          peers: [
+            'https://gun-manhattan.herokuapp.com/gun',
+            'https://gun-us.herokuapp.com/gun',
+            'https://gun-eu.herokuapp.com/gun'
+          ],
+          localStorage: false // Отключаем локальное хранилище Gun, используем свое
+        });
+        
+        console.log('Gun.js инициализирован');
+        return true;
+      } catch (error) {
+        console.error('Ошибка инициализации Gun.js:', error);
+        return false;
+      }
     }
 
     // ======= СИНХРОНИЗАЦИЯ С GUN.JS =======
     function syncPollToGun(poll) {
       if (!gun || !poll) return;
       
-      // Синхронизируем весь опрос в Gun.js
-      const pollNode = gun.get('polls').get(poll.id);
-      
-      // Сохраняем данные опроса
-      pollNode.put({
-        id: poll.id,
-        title: poll.title,
-        status: poll.status,
-        options: poll.options,
-        voters: poll.voters,
-        votes: poll.votes,
-        updatedAt: Date.now()
-      });
-      
-      // Также сохраняем карту кодов доступа
-      const accessMap = store.get('access:map') || {};
-      gun.get('accessMap').put(accessMap);
-      
-      console.log('Опрос синхронизирован с Gun.js');
+      try {
+        // Создаем или получаем узел для опроса
+        const pollNode = gun.get('polls').get(poll.id);
+        
+        // Сохраняем данные опроса
+        pollNode.put({
+          id: poll.id,
+          title: poll.title || '',
+          status: poll.status || 'draft',
+          options: poll.options || [],
+          voters: poll.voters || [],
+          votes: poll.votes || {},
+          updatedAt: Date.now()
+        });
+        
+        console.log('Опрос синхронизирован с Gun.js');
+      } catch (error) {
+        console.error('Ошибка синхронизации с Gun.js:', error);
+      }
     }
 
+    // Загрузка опроса из Gun.js
     function loadPollFromGun(pollId, callback) {
-      if (!gun) {
+      if (!gun || !pollId) {
         if (callback) callback(null);
         return;
       }
       
-      gun.get('polls').get(pollId).once((data) => {
-        if (data && typeof data === 'object') {
-          // Восстанавливаем полную структуру опроса
-          const poll = {
-            id: data.id || pollId,
-            title: data.title || '',
-            status: data.status || 'draft',
-            options: data.options || [],
-            voters: data.voters || [],
-            votes: data.votes || {}
-          };
-          
-          if (callback) callback(poll);
-        } else {
-          if (callback) callback(null);
-        }
-      });
+      try {
+        gun.get('polls').get(pollId).once((data) => {
+          if (data && typeof data === 'object' && data.id) {
+            const poll = {
+              id: data.id,
+              title: data.title || '',
+              status: data.status || 'draft',
+              options: data.options || [],
+              voters: data.voters || [],
+              votes: data.votes || {}
+            };
+            
+            if (callback) callback(poll);
+          } else {
+            if (callback) callback(null);
+          }
+        });
+      } catch (error) {
+        console.error('Ошибка загрузки из Gun.js:', error);
+        if (callback) callback(null);
+      }
     }
 
+    // Подписка на обновления опроса в Gun.js
+    function subscribeToGunUpdates(pollId) {
+      if (!gun || !pollId || currentGunPoll) return;
+      
+      try {
+        currentGunPoll = gun.get('polls').get(pollId);
+        currentGunPoll.on((data) => {
+          if (data && typeof data === 'object' && data.id === pollId) {
+            console.log('Получены обновления из Gun.js');
+            
+            // Обновляем локальные данные
+            current.poll = {
+              id: data.id,
+              title: data.title || '',
+              status: data.status || 'draft',
+              options: data.options || [],
+              voters: data.voters || [],
+              votes: data.votes || {}
+            };
+            
+            // Сохраняем в локальное хранилище
+            store.set('poll:' + current.poll.id, current.poll);
+            
+            // Обновляем UI
+            renderOptions();
+            renderVoters();
+            refreshInfo();
+            drawAll();
+          }
+        });
+      } catch (error) {
+        console.error('Ошибка подписки на обновления Gun.js:', error);
+      }
+    }
+
+    // Отписка от обновлений
+    function unsubscribeFromGunUpdates() {
+      if (currentGunPoll) {
+        currentGunPoll.off();
+        currentGunPoll = null;
+      }
+    }
+
+    // Поиск опроса по коду через Gun.js
     function findPollByCodeGun(code, callback) {
       if (!gun) {
         if (callback) callback(null);
         return;
       }
       
-      // Получаем карту кодов из Gun.js
-      gun.get('accessMap').once((accessMap) => {
-        const codeKey = (code || '').toUpperCase();
-        const pollId = accessMap ? accessMap[codeKey] : null;
-        
-        if (pollId) {
-          loadPollFromGun(pollId, callback);
-        } else {
-          if (callback) callback(null);
+      // Для поиска по коду нам нужно проверить все опросы
+      // Это упрощенная реализация - в production нужен更好的 подход
+      gun.get('polls').map().once((data, id) => {
+        if (data && data.voters) {
+          const voter = data.voters.find(v => 
+            v.code && v.code.toUpperCase() === code.toUpperCase()
+          );
+          
+          if (voter) {
+            if (callback) callback(data);
+            return true; // Останавливаем поиск
+          }
         }
       });
     }
 
     // ======= ОБНОВЛЕННОЕ ЛОКАЛЬНОЕ ХРАНИЛИЩЕ =======
     const store = {
-      get(key){ try { return JSON.parse(localStorage.getItem(key)); } catch(e){ return null; } },
-      set(key,val){ 
-        localStorage.setItem(key, JSON.stringify(val)); 
-        // Синхронизируем с Gun.js при изменении важных данных
-        if (key.startsWith('poll:')) {
-          syncPollToGun(val);
-        }
+      get(key){ 
+        try { 
+          const item = localStorage.getItem(key);
+          return item ? JSON.parse(item) : null; 
+        } catch(e){ 
+          console.error('Ошибка чтения из localStorage:', e);
+          return null; 
+        } 
       },
-      del(key){ localStorage.removeItem(key); }
+      set(key, val){ 
+        try { 
+          localStorage.setItem(key, JSON.stringify(val)); 
+          
+          // Синхронизируем с Gun.js при изменении опросов
+          if (key.startsWith('poll:') && val) {
+            setTimeout(() => syncPollToGun(val), 100);
+          }
+        } catch(e){ 
+          console.error('Ошибка записи в localStorage:', e);
+        } 
+      },
+      del(key){ 
+        try { 
+          localStorage.removeItem(key); 
+        } catch(e){ 
+          console.error('Ошибка удаления из localStorage:', e);
+        } 
+      }
     };
 
     // ======= ОБНОВЛЕННЫЕ ФУНКЦИИ РАБОТЫ С ОПРОСАМИ =======
@@ -134,44 +212,55 @@
         voters: [],
         votes: {}
       };
+      
       current.poll = poll;
       store.set('poll:' + poll.id, poll);
+      
       const my = store.get('my-polls') || [];
-      if(!my.includes(poll.id)) { my.unshift(poll.id); store.set('my-polls', my); }
+      if(!my.includes(poll.id)) { 
+        my.unshift(poll.id); 
+        store.set('my-polls', my); 
+      }
+      
       renderOptions();
       renderVoters();
       refreshInfo();
       $('#poll-title').value = '';
       
-      // Синхронизируем с Gun.js
-      syncPollToGun(poll);
+      // Подписываемся на обновления
+      unsubscribeFromGunUpdates();
+      subscribeToGunUpdates(poll.id);
     }
 
     function loadPoll(id){
+      if (!id) return false;
+      
       // Сначала пробуем загрузить из Gun.js
       loadPollFromGun(id, (gunPoll) => {
         if (gunPoll) {
-          // Обновляем локальное хранилище из облака
+          console.log('Загружено из Gun.js');
           current.poll = gunPoll;
           store.set('poll:' + id, gunPoll);
-          renderOptions();
-          renderVoters();
-          $('#poll-title').value = gunPoll.title || '';
-          refreshInfo();
-          drawAll();
         } else {
           // Fallback на локальное хранилище
-          const p = store.get('poll:' + id);
-          if(!p) return false;
-          current.poll = p;
-          renderOptions();
-          renderVoters();
-          $('#poll-title').value = p.title || '';
-          refreshInfo();
-          
-          // Синхронизируем локальные данные с Gun.js
-          syncPollToGun(p);
+          const localPoll = store.get('poll:' + id);
+          if (!localPoll) {
+            console.log('Опрос не найден');
+            return false;
+          }
+          current.poll = localPoll;
+          console.log('Загружено из localStorage');
         }
+        
+        renderOptions();
+        renderVoters();
+        $('#poll-title').value = current.poll.title || '';
+        refreshInfo();
+        drawAll();
+        
+        // Подписываемся на обновления
+        unsubscribeFromGunUpdates();
+        subscribeToGunUpdates(id);
       });
       
       return true;
@@ -179,22 +268,29 @@
 
     function findPollByCode(code){
       const codeKey = (code||'').toUpperCase();
+      const map = store.get('access:map') || {};
+      const pid = map[codeKey];
       
-      // Сначала пробуем найти через Gun.js
+      if (pid) {
+        const localPoll = store.get('poll:' + pid);
+        if (localPoll) {
+          current.poll = localPoll;
+          refreshInfo();
+          return localPoll;
+        }
+      }
+      
+      // Дополнительно ищем через Gun.js
       findPollByCodeGun(code, (gunPoll) => {
         if (gunPoll) {
           current.poll = gunPoll;
+          store.set('poll:' + gunPoll.id, gunPoll);
           refreshInfo();
-        } else {
-          // Fallback на локальную карту
+          
+          // Регистрируем код в локальной карте
           const map = store.get('access:map') || {};
-          const pid = map[codeKey];
-          if(!pid) return null;
-          const localPoll = store.get('poll:' + pid);
-          if (localPoll) {
-            current.poll = localPoll;
-            refreshInfo();
-          }
+          map[codeKey] = gunPoll.id;
+          store.set('access:map', map);
         }
       });
       
@@ -206,52 +302,62 @@
       code = (code||'').trim().toUpperCase();
       $('#v-code').value = code;
       
-      // Используем Gun.js для поиска опроса
-      findPollByCodeGun(code, (poll) => {
-        if (!poll) {
-          $('#join-msg').textContent = 'Код не найден. Проверьте правильность или обратитесь к организатору.';
-          return;
-        }
-        
-        current.poll = poll;
-        refreshInfo();
-        const voter = poll.voters.find(v=> (v.code||'').toUpperCase()===code);
-        if(!voter){
-          $('#join-msg').textContent = 'Код не найден в списке участников.';
-          return;
-        }
-        if(poll.status==='closed'){
-          $('#join-msg').textContent = 'Опрос завершен. Отправка новых голосов недоступна.';
-        }
+      // Пробуем найти опрос
+      const poll = findPollByCode(code);
+      
+      if(!poll){
+        // Если не нашли локально, ждем ответа от Gun.js
+        setTimeout(() => {
+          const foundPoll = findPollByCode(code);
+          if (!foundPoll) {
+            $('#join-msg').textContent = 'Код не найден. Проверьте правильность или обратитесь к организатору.';
+          } else {
+            completeJoin(foundPoll, code);
+          }
+        }, 1000);
+        return;
+      }
+      
+      completeJoin(poll, code);
+    }
 
-        vState.code = code;
-        vState.pollId = poll.id;
-        vState.budget = Number(voter.coins)||0;
-        vState.allocations = Object.assign({}, poll.votes[code]||{});
-        
-        $('#voter-info').style.display='block';
-        $('#voter-form').style.display='block';
-        $('#v-poll-title').textContent = poll.title || 'Опрос';
-        $('#v-status-pill').textContent = poll.status;
-        $('#v-budget').textContent = vState.budget;
-        
-        renderAllocationForm();
-        updateRemaining();
-        
-        $('#join-msg').textContent = voter.submitted ?
-          'Вы уже голосовали. Можно обновить голос до завершения опроса.' :
-          'Готово: можно голосовать.';
-      });
+    function completeJoin(poll, code) {
+      const voter = poll.voters.find(v => (v.code||'').toUpperCase() === code);
+      
+      if(!voter){
+        $('#join-msg').textContent = 'Код не найден в списке участников.';
+        return;
+      }
+      
+      if(poll.status==='closed'){
+        $('#join-msg').textContent = 'Опрос завершен. Отправка новых голосов недоступна.';
+      }
+
+      vState.code = code;
+      vState.pollId = poll.id;
+      vState.budget = Number(voter.coins)||0;
+      vState.allocations = Object.assign({}, poll.votes[code]||{});
+      
+      $('#voter-info').style.display='block';
+      $('#voter-form').style.display='block';
+      $('#v-poll-title').textContent = poll.title || 'Опрос';
+      $('#v-status-pill').textContent = poll.status;
+      $('#v-budget').textContent = vState.budget;
+      
+      renderAllocationForm();
+      updateRemaining();
+      
+      $('#join-msg').textContent = voter.submitted ?
+        'Вы уже голосовали. Можно обновить голос до завершения опроса.' :
+        'Готово: можно голосовать.';
     }
 
     // ======= ОБНОВЛЕННАЯ ФУНКЦИЯ SAVE POLL =======
     function savePoll(){
       if(!current.poll) return;
+      
       store.set('poll:' + current.poll.id, current.poll);
       localStorage.setItem('poll:sig', String(Date.now()));
-      
-      // Синхронизируем с Gun.js
-      syncPollToGun(current.poll);
       
       if(current.bc) current.bc.postMessage({ t:'updated', id: current.poll.id });
     }
@@ -259,56 +365,72 @@
     // ======= ОБНОВЛЕННЫЙ СТАРТ =======
     (function start(){
       // Инициализируем Gun.js
-      initGun();
+      const gunInitialized = initGun();
       
       const q = new URLSearchParams(location.search);
       let injectedId = null;
       const dataRaw = q.get('data');
       
       if(dataRaw){
-        const decoded = decodeURIComponent(dataRaw);
-        const obj = decodeShare(decoded);
-        if(obj && obj.id){
-          store.set('poll:' + obj.id, obj);
-          injectedId = obj.id;
-          syncPollToGun(obj);
+        try {
+          const decoded = decodeURIComponent(dataRaw);
+          const obj = decodeShare(decoded);
+          if(obj && obj.id){
+            store.set('poll:' + obj.id, obj);
+            injectedId = obj.id;
+            if (gunInitialized) {
+              syncPollToGun(obj);
+            }
+          }
+        } catch (e) {
+          console.error('Ошибка декодирования данных:', e);
         }
       }
       
       const pid = q.get('poll') || injectedId;
-      if(!pid) newPoll(); else loadPoll(pid);
+      if(!pid) {
+        newPoll();
+      } else {
+        loadPoll(pid);
+      }
       
-      if(injectedId){ try { registerCodes(); } catch(e){} }
+      if(injectedId){ 
+        try { 
+          registerCodes(); 
+        } catch(e){} 
+      }
       
       refreshInfo();
       drawAll();
       initFromQuery();
       
       if(current.poll) setupBroadcast();
-      
-      // Подписываемся на обновления из Gun.js
-      if (gun && current.poll) {
-        gun.get('polls').get(current.poll.id).on((data) => {
-          if (data && typeof data === 'object' && data.id === current.poll.id) {
-            // Обновляем локальные данные при изменениях извне
-            current.poll = data;
-            store.set('poll:' + data.id, data);
-            renderOptions();
-            renderVoters();
-            refreshInfo();
-            drawAll();
-          }
-        });
-      }
     })();
 
     // Остальной код остается без изменений...
     // ======= КОДИРОВАНИЕ/ДЕКОДИРОВАНИЕ =======
-    function encodeShare(obj){ /* ... */ }
-    function decodeShare(s){ /* ... */ }
+    function encodeShare(obj){
+      try {
+        const json = JSON.stringify(obj);
+        const bytes = new TextEncoder().encode(json);
+        let bin = '';
+        bytes.forEach(b => bin += String.fromCharCode(b));
+        return btoa(bin);
+      } catch(e){ console.error(e); return ''; }
+    }
+    
+    function decodeShare(s){
+      try {
+        const bin = atob(s);
+        const bytes = new Uint8Array([...bin].map(ch => ch.charCodeAt(0)));
+        const json = new TextDecoder().decode(bytes);
+        return JSON.parse(json);
+      } catch(e){ console.warn('decodeShare failed', e); return null; }
+    }
 
     // ======= ГЛОБАЛЬНОЕ СОСТОЯНИЕ =======
     let current = { poll: null, chart: null, screenChart: null, bc: null };
+    let vState = { code: null, pollId: null, budget: 0, allocations: {} };
 
     // ======= ОСТАЛЬНЫЕ ФУНКЦИИ БЕЗ ИЗМЕНЕНИЙ =======
     function refreshInfo(){ /* ... */ }
@@ -319,6 +441,8 @@
     function drawAll(){ /* ... */ }
     function drawChart(sel){ /* ... */ }
     function fillResultsTable(){ /* ... */ }
+    function setupBroadcast(){ /* ... */ }
+    function initFromQuery(){ /* ... */ }
     // ... и все остальные функции
 
   </script>
