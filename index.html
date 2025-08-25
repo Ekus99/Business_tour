@@ -7,7 +7,6 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <!-- Синхронизация: GUN P2P -->
   <script src="https://cdn.jsdelivr.net/npm/gun/gun.min.js"></script>
   <style>
     :root {
@@ -18,7 +17,7 @@
       --muted: #a8b0d3;
       --accent: #6c8cff;
       --accent-2: #29d3b1;
-      --danger: #ff5c7а;
+      --danger: #ff5c7a;
       --ok: #29c76f;
       --border: #2a315f;
       --shadow: 0 10px 20px rgba(0,0,0,.25);
@@ -355,7 +354,60 @@
       set(key,val){ localStorage.setItem(key, JSON.stringify(val)); },
       del(key){ localStorage.removeItem(key); }
     };
+    // ======= GUN.JS РЕАЛЬНОЕ ВРЕМЯ (кросс-девайс) =======
+// Можно задать пиров через ?peers=url1,url2 (по умолчанию использован публичный пример)
+let gun = null;
+(function initGun(){
+  try {
+    const peersParam = new URLSearchParams(location.search).get('peers');
+    const defaultPeers = ['https://gun-manhattan.herokuapp.com/gun'];
+    const peers = (peersParam ? peersParam.split(',') : defaultPeers).map(s=>s.trim()).filter(Boolean);
+    if (typeof Gun !== 'undefined') {
+      gun = Gun({ peers, retry: Infinity });
+      console.log('[GUN] peers:', peers);
+    } else {
+      console.warn('[GUN] Скрипт Gun не загружен — синхронизация между устройствами недоступна.');
+    }
+  } catch(e) { console.warn('[GUN] init failed', e); }
+})();
 
+const net = {
+  putPoll(poll){
+    if(!gun || !poll?.id) return;
+    try { gun.get('polls').get(poll.id).put({ data: JSON.stringify(poll), ts: Date.now() }); } catch(e){}
+  },
+  onPoll(id, handler){
+    if(!gun || !id) return;
+    gun.get('polls').get(id).on((node)=>{
+      if(!node || !node.data) return;
+      let obj; try { obj = JSON.parse(node.data); } catch(e){ return; }
+      handler(obj, Number(node.ts)||0);
+    });
+  },
+  setCode(codeUpper, pid){
+    if(!gun || !codeUpper || !pid) return;
+    try { gun.get('codes').get(codeUpper).put(pid); } catch(e){}
+  },
+  getPollOnce(id){
+    if(!gun || !id) return Promise.resolve(null);
+    return new Promise(res => {
+      let done=false;
+      gun.get('polls').get(id).once(node => {
+        if(done) return; done=true;
+        try { res(node && node.data ? JSON.parse(node.data) : null); } catch(e){ res(null); }
+      });
+      setTimeout(()=>{ if(!done) res(null); }, 4000);
+    });
+  },
+  getPollIdByCode(codeUpper){
+    if(!gun || !codeUpper) return Promise.resolve(null);
+    return new Promise(res => {
+      let done=false;
+      gun.get('codes').get(codeUpper).once(pid => { done=true; res(pid||null); });
+      setTimeout(()=>{ if(!done) res(null); }, 3000);
+    });
+  }
+};
     // Кодирование/декодирование опроса для передачи в ссылке
     function encodeShare(obj){
       try {
@@ -375,93 +427,6 @@
       } catch(e){ console.warn('decodeShare failed', e); return null; }
     }
 
-    // ====== Кросс-девайс синхронизация (GUN) ======
-    let gun = null, gunRoot = null, gunNode = null, lastCloudTs = 0, fromCloud = false, cloudBoundId = null;
-    function setupCloud(){
-      if(gun) return;
-      try {
-        const qs = new URLSearchParams(location.search);
-        const customPeer = qs.get('peer');
-        const peers = customPeer ? [customPeer] : ['https://relay.peer.gunjs.org/gun'];
-        gun = Gun({ peers });
-        gunRoot = gun.get('coinpoll');
-      } catch(e){ console.warn('GUN init failed', e); }
-    }
-    function bindCloud(){
-      if(!gun || !current.poll) return;
-      if(cloudBoundId === current.poll.id && gunNode) return;
-      cloudBoundId = current.poll.id;
-      gunNode = gunRoot.get(current.poll.id);
-      gunNode.once((d)=>{
-        const ts = Number(d?.updatedAt)||0;
-        if(d?.blob && ts > (current.poll?.updatedAt||0)){
-          try{
-            const incoming = JSON.parse(d.blob);
-            fromCloud = true;
-            current.poll = incoming;
-            store.set('poll:' + current.poll.id, current.poll);
-            renderOptions(); renderVoters(); drawAll(); refreshInfo();
-            fromCloud = false;
-          }catch(e){}
-        }
-        lastCloudTs = Math.max(lastCloudTs, ts);
-      });
-      gunNode.on((d)=>{
-        if(!d || !d.blob) return;
-        const ts = Number(d.updatedAt)||0;
-        if(ts <= lastCloudTs) return;
-        lastCloudTs = ts;
-        try{
-          const incoming = JSON.parse(d.blob);
-          if(JSON.stringify(incoming) === JSON.stringify(current.poll)) return;
-          fromCloud = true;
-          current.poll = incoming;
-          store.set('poll:' + current.poll.id, current.poll);
-          renderOptions(); renderVoters(); drawAll(); refreshInfo();
-          fromCloud = false;
-        }catch(e){ console.warn('Cloud parse failed', e); }
-      });
-    }
-    function pushCloud(){
-      if(!gunNode || !current.poll || fromCloud) return;
-      current.poll.updatedAt = Date.now();
-      lastCloudTs = current.poll.updatedAt;
-      gunNode.put({ blob: JSON.stringify(current.poll), updatedAt: current.poll.updatedAt });
-    }
-    function cloudRegisterCodes(){
-      if(!gunRoot || !current.poll) return;
-      const codes = gun.get('coinpollCodes');
-      (current.poll?.voters||[]).forEach(v => {
-        const c = (v.code||'').toUpperCase(); if(!c) return;
-        codes.get(c).put(current.poll.id);
-      });
-    }
-    function cloudFindPollIdByCode(code){
-      return new Promise((resolve)=>{
-        if(!gun) { resolve(null); return; }
-        const codes = gun.get('coinpollCodes');
-        codes.get((code||'').toUpperCase()).once((pid)=> resolve(typeof pid === 'string' ? pid : (pid||null)));
-        setTimeout(()=>resolve(null), 4000);
-      });
-    }
-    function cloudFetchPollById(pid){
-      return new Promise((resolve)=>{
-        setupCloud();
-        const node = gun.get('coinpoll').get(pid);
-        node.once((d)=>{
-          try{
-            if(d?.blob){
-              const incoming = JSON.parse(d.blob);
-              resolve(incoming);
-            } else resolve(null);
-          }catch(e){ resolve(null); }
-        });
-        setTimeout(()=>resolve(null), 4000);
-      });
-    }
-    setInterval(()=>{ if(current.poll) pushCloud(); }, 8000);
-    // ================================================
-
     // Глобальное состояние текущего опроса
     let current = { poll: null, chart: null, screenChart: null, bc: null };
 
@@ -472,12 +437,13 @@
       $('#info-options').textContent = current.poll?.options?.length || 0;
       $('#info-voters').textContent = current.poll?.voters?.length || 0;
 
-      // Ссылки с вшитой копией опроса — кодируем в URL
-      const pack = current.poll ? encodeURIComponent(encodeShare(current.poll)) : '';
+      // Ссылки с вшитой копией опроса — ОБЯЗАТЕЛЬНО кодируем в URL
+      const pack = current.poll ? encodeShare(current.poll) : '';
+      const packEnc = pack ? encodeURIComponent(pack) : '';
       const base = location.origin + location.pathname;
       const pid  = current.poll?.id || '';
-      const voterLink  = `${base}?view=voter&poll=${pid}${pack ? `&data=${pack}` : ''}`;
-      const screenLink = `${base}?view=screen&poll=${pid}${pack ? `&data=${pack}` : ''}`;
+      const voterLink  = `${base}?view=voter&poll=${pid}${packEnc ? `&data=${packEnc}` : ''}`;
+      const screenLink = `${base}?view=screen&poll=${pid}${packEnc ? `&data=${packEnc}` : ''}`;
       $('#link-voter').value = voterLink;
       $('#link-screen').value = screenLink;
     }
@@ -490,8 +456,7 @@
         status: 'draft', // 'open' | 'closed'
         options: [], // {id, label}
         voters: [], // {name, coins, code, submitted}
-        votes: {}, // code -> { optionId: coins }
-        updatedAt: Date.now()
+        votes: {} // code -> { optionId: coins }
       };
       current.poll = poll;
       store.set('poll:' + poll.id, poll);
@@ -501,19 +466,17 @@
       renderVoters();
       refreshInfo();
       $('#poll-title').value = '';
-
-      // Синхронизация в облаке
-      setupCloud(); bindCloud(); pushCloud();
     }
 
     // Сохранить в хранилище и разослать сигнал
-    function savePoll(){
-      if(!current.poll) return;
-      store.set('poll:' + current.poll.id, current.poll);
-      localStorage.setItem('poll:sig', String(Date.now()));
-      if(current.bc) current.bc.postMessage({ t:'updated', id: current.poll.id });
-      pushCloud();
-    }
+  function savePoll(){
+  if(!current.poll) return;
+  current.poll._ts = Date.now();
+  store.set('poll:' + current.poll.id, current.poll);
+  localStorage.setItem('poll:sig', String(current.poll._ts));
+  if(current.bc) current.bc.postMessage({ t:'updated', id: current.poll.id });
+  try { net.putPoll(current.poll); } catch(e){}
+}
 
     // Загрузить опрос по id
     function loadPoll(id){
@@ -524,7 +487,6 @@
       renderVoters();
       $('#poll-title').value = p.title || '';
       refreshInfo();
-      setupCloud(); bindCloud(); pushCloud();
       return true;
     }
 
@@ -539,21 +501,22 @@
 
     // Зарегистрировать карту кодов: code(UPPER) -> pollId
     function registerCodes(){
-      const map = store.get('access:map') || {};
-      (current.poll?.voters||[]).forEach(v => {
-        if(v.code){
-          map[(v.code||'').toUpperCase()] = current.poll.id;
-        }
-      });
-      store.set('access:map', map);
-      cloudRegisterCodes();
+  const map = store.get('access:map') || {};
+  (current.poll?.voters||[]).forEach(v => {
+    if(v.code){
+      const up = (v.code||'').toUpperCase();
+      map[up] = current.poll.id;
+      try { net.setCode(up, current.poll.id); } catch(e){}
     }
+  });
+  store.set('access:map', map);
+}
 
     // ======= РЕНДЕР ВАРИАНТОВ =======
     function renderOptions(){
       const wrap = $('#options-list');
       wrap.innerHTML = '';
-      (current.poll?.options || []).forEach((opt) => {
+      (current.poll?.options || []).forEach((opt, idx) => {
         const row = document.createElement('div');
         row.className = 'item';
         row.innerHTML = `
@@ -606,6 +569,7 @@
             current.poll.voters[i][f] = e.target.value;
           }
           savePoll(); refreshInfo();
+          // >>> если изменили код — пересобрать карту кодов (UPPER)
           if(f==='code') registerCodes();
         });
       });
@@ -683,32 +647,46 @@
     // ======= ВКЛАДКА УЧАСТНИКА =======
     let vState = { code: null, pollId: null, budget: 0, allocations: {} };
 
-    async function joinByCode(code){
-      code = (code||'').trim().toUpperCase();
-      $('#v-code').value = code;
-      let poll = findPollByCode(code);
-      if(!poll){
-        setupCloud();
-        const pid = await cloudFindPollIdByCode(code);
-        if(pid){ const remote = await cloudFetchPollById(pid); if(remote){ poll = remote; store.set('poll:'+pid, remote); } }
-      }
-      if(!poll){ $('#join-msg').textContent = 'Код не найден. Проверьте правильность или обратитесь к организатору.'; return; }
-      current.poll = poll; refreshInfo();
-      const voter = poll.voters.find(v=> (v.code||'').toUpperCase()===code);
-      if(!voter){ $('#join-msg').textContent = 'Код не найден в списке участников.'; return; }
-      if(poll.status==='closed'){ $('#join-msg').textContent = 'Опрос завершен. Отправка новых голосов недоступна.'; }
+  async function joinByCode(code){
+  code = (code||'').trim().toUpperCase();
+  $('#v-code').value = code;
 
-      vState.code = code; vState.pollId = poll.id; vState.budget = Number(voter.coins)||0;
-      vState.allocations = Object.assign({}, poll.votes[code]||{});
-      $('#voter-info').style.display='block';
-      $('#voter-form').style.display='block';
-      $('#v-poll-title').textContent = poll.title || 'Опрос';
-      $('#v-status-pill').textContent = poll.status;
-      $('#v-budget').textContent = vState.budget;
-      renderAllocationForm();
-      updateRemaining();
-      $('#join-msg').textContent = voter.submitted ? 'Вы уже голосовали. Можно обновить голос до завершения опроса.' : 'Готово: можно голосовать.';
+  // 1) локально
+  let poll = findPollByCode(code);
+
+  // 2) если не нашли — спросим сеть (GUN)
+  if(!poll){
+    $('#join-msg').textContent = 'Ищем код в сети...';
+    const pid = await net.getPollIdByCode(code);
+    if(pid){
+      const remote = await net.getPollOnce(pid);
+      if(remote){
+        store.set('poll:'+pid, remote);
+        poll = remote;
+      }
     }
+  }
+
+  if(!poll){ $('#join-msg').textContent = 'Код не найден. Проверьте правильность или обратитесь к организатору.'; return; }
+
+  current.poll = poll; refreshInfo();
+  startNetSync();
+
+  const voter = poll.voters.find(v=> (v.code||'').toUpperCase()===code);
+  if(!voter){ $('#join-msg').textContent = 'Код не найден в списке участников.'; return; }
+  if(poll.status==='closed'){ $('#join-msg').textContent = 'Опрос завершен. Отправка новых голосов недоступна.'; }
+
+  vState.code = code; vState.pollId = poll.id; vState.budget = Number(voter.coins)||0;
+  vState.allocations = Object.assign({}, poll.votes[code]||{});
+  $('#voter-info').style.display='block';
+  $('#voter-form').style.display='block';
+  $('#v-poll-title').textContent = poll.title || 'Опрос';
+  $('#v-status-pill').textContent = poll.status;
+  $('#v-budget').textContent = vState.budget;
+  renderAllocationForm();
+  updateRemaining();
+  $('#join-msg').textContent = voter.submitted ? 'Вы уже голосовали. Можно обновить голос до завершения опроса.' : 'Готово: можно голосовать.';
+}
 
     function renderAllocationForm(){
       const wrap = $('#alloc-list');
@@ -906,7 +884,24 @@
       if(current.bc) current.bc.close();
       current.bc = new BroadcastChannel('poll-'+current.poll.id);
       current.bc.onmessage = (msg)=>{ if(msg?.data?.t==='updated'){ current.poll = store.get('poll:'+current.poll.id); drawAll(); refreshInfo(); } };
+      if (current.poll) {
+  setupBroadcast();
+  startNetSync();
+  try { net.putPoll(current.poll); } catch(e){}
     }
+    }
+    function startNetSync(){
+  if(!gun || !current.poll) return;
+  try {
+    net.onPoll(current.poll.id, (obj, ts)=>{
+      const localTs = Number(current.poll?._ts||0);
+      if(ts && localTs && ts <= localTs) return; // не затираем более свежие локальные изменения
+      current.poll = obj;
+      store.set('poll:' + obj.id, obj);
+      renderOptions(); renderVoters(); refreshInfo(); drawAll();
+    });
+  } catch(e){ console.warn('[GUN] subscribe failed', e); }
+}
 
     // ======= АВТОНАСТРОЙКА ПО ПАРАМЕТРАМ URL =======
     function initFromQuery(){
@@ -934,24 +929,7 @@
       }
       // 2) Выбираем id: явно из ?poll=, иначе импортированный, иначе создаем новый
       const pid = q.get('poll') || injectedId;
-      if(!pid) {
-        newPoll();
-      } else {
-        const ok = loadPoll(pid);
-        if(!ok){
-          setupCloud();
-          cloudFetchPollById(pid).then(remote=>{
-            if(remote){
-              current.poll = remote;
-              store.set('poll:'+pid, remote);
-              renderOptions(); renderVoters(); refreshInfo(); drawAll();
-              setupCloud(); bindCloud(); pushCloud();
-            } else {
-              newPoll();
-            }
-          });
-        }
-      }
+      if(!pid) newPoll(); else loadPoll(pid) || newPoll();
 
       // Если импортировали опрос — зарегистрировать коды (в UPPERCASE)
       if(injectedId){ try { registerCodes(); } catch(e){} }
